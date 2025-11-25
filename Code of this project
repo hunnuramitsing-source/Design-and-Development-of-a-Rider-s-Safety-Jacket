@@ -1,0 +1,281 @@
+#include <Wire.h>
+#include <MPU6050.h>
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+
+// Sensor Pins
+#define ALCOHOL_SENSOR A0
+#define FIRE_SENSOR A1
+#define RELAY_PIN PA0
+#define RED_LED PA1
+#define GREEN_LED PA2
+#define BLUE_LED PA3
+
+// GPS and GSM Serial
+SoftwareSerial gpsSerial(PA9, PA10);  // RX, TX for GPS
+SoftwareSerial gsmSerial(PA11, PA12); // RX, TX for GSM
+
+// Objects
+MPU6050 mpu;
+TinyGPSPlus gps;
+
+// Variables
+bool accidentDetected = false;
+bool alcoholDetected = false;
+bool fireDetected = false;
+unsigned long lastAccidentCheck = 0;
+unsigned long lastSmsTime = 0;
+const unsigned long ACCIDENT_CHECK_INTERVAL = 100;
+const unsigned long SMS_COOLDOWN = 30000; // 30 seconds
+
+// MPU6050 Variables
+float accelX, accelY, accelZ;
+float gyroX, gyroY, gyroZ;
+float accelThreshold = 2.5; // Adjust based on sensitivity
+float gyroThreshold = 200.0;
+
+// Alcohol sensor threshold
+int alcoholThreshold = 500;
+
+// Fire sensor threshold
+int fireThreshold = 300;
+
+void setup() {
+  // Initialize Serial
+  Serial.begin(115200);
+  gpsSerial.begin(9600);
+  gsmSerial.begin(9600);
+  
+  // Initialize pins
+  pinMode(ALCOHOL_SENSOR, INPUT);
+  pinMode(FIRE_SENSOR, INPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BLUE_LED, OUTPUT);
+  
+  // Initialize MPU6050
+  Serial.println("Initializing MPU6050...");
+  Wire.begin();
+  mpu.initialize();
+  
+  // Test MPU6050 connection
+  if (mpu.testConnection()) {
+    Serial.println("MPU6050 connection successful");
+  } else {
+    Serial.println("MPU6050 connection failed");
+  }
+  
+  // Initialize GSM module
+  initializeGSM();
+  
+  // Set initial LED state (Green - Normal)
+  setLED(0, 255, 0); // Green
+  
+  Serial.println("Smart Rider Jacket System Started");
+}
+
+void loop() {
+  // Read all sensors
+  readAlcoholSensor();
+  readFireSensor();
+  checkAccident();
+  
+  // Handle GPS data
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+  }
+  
+  // Process detected events
+  processEvents();
+  
+  delay(50);
+}
+
+void readAlcoholSensor() {
+  int alcoholValue = analogRead(ALCOHOL_SENSOR);
+  
+  if (alcoholValue > alcoholThreshold) {
+    alcoholDetected = true;
+    Serial.println("Alcohol detected! Value: " + String(alcoholValue));
+  } else {
+    alcoholDetected = false;
+  }
+}
+
+void readFireSensor() {
+  int fireValue = analogRead(FIRE_SENSOR);
+  
+  if (fireValue > fireThreshold) {
+    fireDetected = true;
+    Serial.println("Fire detected! Value: " + String(fireValue));
+  } else {
+    fireDetected = false;
+  }
+}
+
+void checkAccident() {
+  if (millis() - lastAccidentCheck >= ACCIDENT_CHECK_INTERVAL) {
+    lastAccidentCheck = millis();
+    
+    // Read accelerometer and gyroscope data
+    int16_t ax, ay, az, gx, gy, gz;
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    
+    // Convert to G's and degrees per second
+    accelX = ax / 16384.0;
+    accelY = ay / 16384.0;
+    accelZ = az / 16384.0;
+    gyroX = gx / 131.0;
+    gyroY = gy / 131.0;
+    gyroZ = gz / 131.0;
+    
+    // Calculate total acceleration (excluding gravity)
+    float totalAccel = sqrt(accelX*accelX + accelY*accelY + accelZ*accelZ) - 1.0;
+    float totalGyro = sqrt(gyroX*gyroX + gyroY*gyroY + gyroZ*gyroZ);
+    
+    // Check for accident conditions
+    if (totalAccel > accelThreshold || totalGyro > gyroThreshold) {
+      if (!accidentDetected) {
+        accidentDetected = true;
+        Serial.println("Accident detected!");
+        Serial.println("Accel: " + String(totalAccel) + "G, Gyro: " + String(totalGyro) + "°/s");
+      }
+    } else {
+      accidentDetected = false;
+    }
+  }
+}
+
+void processEvents() {
+  // Priority: Accident > Fire > Alcohol > Normal
+  if (accidentDetected) {
+    handleAccident();
+  } else if (fireDetected) {
+    handleFire();
+  } else if (alcoholDetected) {
+    handleAlcohol();
+  } else {
+    setNormalState();
+  }
+}
+
+void handleAccident() {
+  setLED(255, 0, 0); // Red LED
+  activateAirbag();
+  
+  // Send SMS with location if cooldown period has passed
+  if (millis() - lastSmsTime > SMS_COOLDOWN) {
+    sendEmergencySMS("ACCIDENT");
+    lastSmsTime = millis();
+  }
+}
+
+void handleFire() {
+  setLED(255, 0, 0); // Red LED
+  Serial.println("Fire emergency! Please take immediate action.");
+}
+
+void handleAlcohol() {
+  setLED(255, 0, 0); // Red LED
+  Serial.println("Alcohol detected! Riding under influence is dangerous.");
+}
+
+void setNormalState() {
+  setLED(0, 255, 0); // Green LED
+  digitalWrite(RELAY_PIN, LOW);
+}
+
+void activateAirbag() {
+  digitalWrite(RELAY_PIN, HIGH);
+  Serial.println("Airbag activated!");
+  delay(5000); // Inflate for 5 seconds
+  digitalWrite(RELAY_PIN, LOW);
+}
+
+void setLED(int red, int green, int blue) {
+  analogWrite(RED_LED, red);
+  analogWrite(GREEN_LED, green);
+  analogWrite(BLUE_LED, blue);
+}
+
+void initializeGSM() {
+  Serial.println("Initializing GSM module...");
+  delay(2000);
+  
+  // Check if GSM module is responding
+  gsmSerial.println("AT");
+  delay(1000);
+  while(gsmSerial.available()) {
+    Serial.write(gsmSerial.read());
+  }
+  
+  // Configure SMS text mode
+  gsmSerial.println("AT+CMGF=1");
+  delay(1000);
+  while(gsmSerial.available()) {
+    Serial.write(gsmSerial.read());
+  }
+  
+  Serial.println("GSM module initialized");
+}
+
+void sendEmergencySMS(String emergencyType) {
+  String latitude = "0.0";
+  String longitude = "0.0";
+  
+  // Get GPS coordinates if available
+  if (gps.location.isValid()) {
+    latitude = String(gps.location.lat(), 6);
+    longitude = String(gps.location.lng(), 6);
+  } else {
+    latitude = "Unknown";
+    longitude = "Unknown";
+  }
+  
+  // Emergency contact number - REPLACE WITH ACTUAL NUMBER
+  String phoneNumber = "+1234567890";
+  
+  // Create emergency message
+  String message = "EMERGENCY ALERT! ";
+  message += emergencyType;
+  message += " detected. ";
+  message += "Location: ";
+  message += "Lat: " + latitude + ", Lon: " + longitude;
+  message += " - Smart Rider Jacket";
+  
+  Serial.println("Sending SMS: " + message);
+  
+  // Send SMS
+  gsmSerial.println("AT+CMGS=\"" + phoneNumber + "\"");
+  delay(1000);
+  gsmSerial.print(message);
+  delay(500);
+  gsmSerial.write(26); // Ctrl+Z to send
+  delay(5000);
+  
+  Serial.println("Emergency SMS sent");
+}
+
+// Debug function to print sensor data
+void printSensorData() {
+  Serial.print("Alcohol: ");
+  Serial.print(analogRead(ALCOHOL_SENSOR));
+  Serial.print(" | Fire: ");
+  Serial.print(analogRead(FIRE_SENSOR));
+  Serial.print(" | Accel: ");
+  Serial.print(accelX);
+  Serial.print(",");
+  Serial.print(accelY);
+  Serial.print(",");
+  Serial.print(accelZ);
+  Serial.print(" | GPS: ");
+  if (gps.location.isValid()) {
+    Serial.print(gps.location.lat(), 6);
+    Serial.print(",");
+    Serial.print(gps.location.lng(), 6);
+  } else {
+    Serial.print("No GPS");
+  }
+  Serial.println();
+}
